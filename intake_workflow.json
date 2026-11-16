@@ -1,0 +1,706 @@
+{
+  "name": "Контроль накладных: фото, Ollama, сверка с прайсом (эп. 47)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "c80fd3fc-d593-57e9-bc70-67ca57dffc12",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      },
+      "webhookId": ""
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message && $json.message.photo ? 'yes' : 'no' }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "yes"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "фото накладной"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ ($json.callback_query && $json.callback_query.data) || '' }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    },
+                    "rightValue": "act:"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "акт"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "другое"
+        }
+      },
+      "name": "Что пришло",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        240,
+        300
+      ],
+      "id": "83af5eac-69bc-5904-8784-469359584c62",
+      "notes": "Фото накладной, кнопка «Оформить акт» или другое сообщение."
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $('Telegram Trigger').item.json.message.photo.slice(-1)[0].file_id }}",
+        "download": true
+      },
+      "name": "Скачать фото",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        120
+      ],
+      "id": "44bd7641-5abe-5bb0-9be9-bec33d4b2864",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/photos/{{ $('Telegram Trigger').item.json.message.message_id }}_{{ $now.toFormat('yyyyLLdd_HHmmss') }}.jpg",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "name": "Сохранить фото в архив",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        720,
+        20
+      ],
+      "id": "6f9b9b27-ba47-5039-89dc-893efbeac319",
+      "notes": "Фото накладной в папку /photos (том Docker): архив для споров с поставщиком, входит в резервную копию."
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "binaryPropertyName": "data",
+        "destinationKey": "img",
+        "options": {}
+      },
+      "name": "В base64",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        720,
+        200
+      ],
+      "id": "1c7be503-c8d2-5105-b0c0-dd5c41d5b48c"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'qwen2.5vl:7b', stream: false, format: 'json', messages: [ { role: 'user', content: 'Прочитай накладную на фото. Верни только JSON вида {\"rows\":[{\"name\":\"название товара\",\"qty\":число,\"unit\":\"единица\",\"price\":число,\"sum\":число}]}. Если значение не видно, ставь null. Ничего не выдумывай.', images: [ $json.img ] } ] }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "name": "Распознать Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        200
+      ],
+      "id": "7e792fcd-2213-58c4-bcc5-6a0db7b272c8",
+      "notes": "Локальная модель Ollama (мультимодальная). Имя модели, адрес /api/chat и формат ответа сверьте с документацией Ollama вашей версии. Модель должна быть скачана: docker compose exec ollama ollama pull qwen2.5vl:7b"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Разбор ответа Ollama и жёсткая проверка «количество x цена = сумма строки» ДО записи в базу.\nconst raw = ($json.message && $json.message.content) ? $json.message.content : '';\nlet data = null;\ntry { data = JSON.parse(raw); } catch (e) { data = null; }\nconst num = (v) => { const n = Number(String(v).replace(/\\s/g, '').replace(',', '.')); return Number.isFinite(n) ? n : null; };\nconst rows = (data && Array.isArray(data.rows) ? data.rows : []).map((r) => ({\n  name: String(r.name || '').trim(), qty: num(r.qty), unit: String(r.unit || '').trim(), price: num(r.price), line_sum: num(r.sum),\n})).filter((r) => r.name && r.qty !== null && r.price !== null);\nconst bad = rows.filter((r) => r.line_sum !== null && Math.abs(r.qty * r.price - r.line_sum) > Math.max(0.5, r.line_sum * 0.01));\nreturn [{ json: { rows, rowsCount: rows.length, badMath: bad.length, badNames: bad.map((r) => r.name).join(', ') } }];"
+      },
+      "name": "Разобрать JSON и проверить суммы",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        200
+      ],
+      "id": "8fd9651c-61f8-5704-854e-059a6bb6df1e",
+      "notes": "Why Code: разбор JSON модели с запятыми и пробелами в числах и проверка умножения построчно: нативные узлы не покрывают."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.rowsCount }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "rightValue": 0
+            },
+            {
+              "leftValue": "={{ $json.badMath }}",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Строки и суммы в порядке?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        200
+      ],
+      "id": "fafda6e7-5ab0-5837-88f6-e0c832f5f41d"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=Не смог надёжно прочитать накладную. {{ $json.badMath > 0 ? 'Не сходится количество x цена в строках: ' + $json.badNames + '. ' : '' }}Сфотографируйте бланк ровно, без бликов и складок, и отправьте ещё раз.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Не разобрал",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        400
+      ],
+      "id": "3bf0e12f-9924-5d66-ac19-ce5b85054426",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inv AS (INSERT INTO invoices (chat_id, raw) VALUES ($1, $2::jsonb) RETURNING id), ins AS (INSERT INTO invoice_lines (invoice_id, name, qty, unit, price, line_sum) SELECT inv.id, x.name, x.qty, x.unit, x.price, x.line_sum FROM inv, jsonb_to_recordset($2::jsonb) AS x(name text, qty numeric, unit text, price numeric, line_sum numeric) RETURNING invoice_id) SELECT inv.id AS invoice_id, (SELECT count(*) FROM ins) AS saved FROM inv;",
+        "options": {
+          "queryReplacement": "={{ [ $('Telegram Trigger').item.json.message.chat.id, JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "Записать накладную",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1680,
+        100
+      ],
+      "id": "11b36d37-2901-56a4-bdb9-216f220ef599",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.name, l.qty, l.price, p.price_agreed, p.qty_expected, round((l.price - p.price_agreed) / NULLIF(p.price_agreed, 0) * 100, 1) AS price_dev_pct, (p.qty_expected - l.qty) AS short_qty, (l.price > p.price_agreed * (1 + p.tolerance_pct / 100)) AS price_bad, (l.qty < p.qty_expected) AS qty_bad FROM invoice_lines l LEFT JOIN price_list p ON lower(p.name) = lower(l.name) WHERE l.invoice_id = $1 ORDER BY l.id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.invoice_id ] }}"
+        }
+      },
+      "name": "Найти отклонения",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1920,
+        100
+      ],
+      "id": "3da61968-fa89-585f-a401-98f4befe411d",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Сведение строк в один сигнал: красный, если есть отклонение цены, недовоз или товар не из прайса.\nconst rows = $input.all().map((i) => i.json);\nconst lines = [];\nlet red = false;\nfor (const r of rows) {\n  if (r.price_agreed === null || r.price_agreed === undefined) { red = true; lines.push(r.name + ': нет в прайсе'); continue; }\n  if (r.price_bad) { red = true; lines.push(r.name + ': цена ' + r.price + ' против ' + r.price_agreed + ' (' + (Number(r.price_dev_pct) > 0 ? '+' : '') + r.price_dev_pct + '%)'); }\n  if (r.qty_bad) { red = true; lines.push(r.name + ': привезли ' + r.qty + ', по заказу ' + r.qty_expected + ' (недовоз ' + r.short_qty + ')'); }\n}\nreturn [{ json: { invoice_id: $('Записать накладную').first().json.invoice_id, red, report: lines.join('\\n'), checked: rows.length } }];"
+      },
+      "name": "Свести сигнал",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        100
+      ],
+      "id": "5a3027ba-94ad-50dc-aa7f-d4f736297004",
+      "notes": "Why Code: свод нескольких строк результата запроса в один красный или зелёный сигнал с текстом отчёта."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.red }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Есть отклонения?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2400,
+        100
+      ],
+      "id": "f8cefede-f0f6-517c-b6d2-b7554603b9d6"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE invoices SET status = 'blocked' WHERE id = $1 RETURNING id AS invoice_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.invoice_id ] }}"
+        }
+      },
+      "name": "Заблокировать закрытие",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2640,
+        0
+      ],
+      "id": "45857350-a5ce-5d36-a23d-6ce86cc5fa96",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=🔴 СТОП. Накладная №{{ $json.invoice_id }}: закрытие приёмки заблокировано, пока нет акта.\n{{ $('Свести сигнал').item.json.report }}",
+        "additionalFields": {
+          "appendAttribution": false
+        },
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "Оформить акт и закрыть",
+                    "additionalFields": {
+                      "callback_data": "=act:{{ $json.invoice_id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "Красный сигнал",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2880,
+        0
+      ],
+      "id": "483cf700-ac06-5629-9b36-2e2f555c4006",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE invoices SET status = 'accepted', closed_at = now() WHERE id = $1 RETURNING id AS invoice_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.invoice_id ] }}"
+        }
+      },
+      "name": "Принять приёмку",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2640,
+        220
+      ],
+      "id": "689b6ca9-2c72-528b-b8cb-c230c74461a5",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=🟢 Накладная №{{ $json.invoice_id }}: цены и количество совпали с прайсом, приёмку можно закрывать.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Зелёный сигнал",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2880,
+        220
+      ],
+      "id": "5ea073ea-d735-574e-b44c-843bbe106ed3",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE invoices SET status = 'closed_with_act', closed_at = now() WHERE id = $1 AND chat_id = $2 AND status = 'blocked' RETURNING id AS invoice_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Telegram Trigger').item.json.callback_query.data.slice(4), $('Telegram Trigger').item.json.callback_query.message.chat.id ] }}"
+        }
+      },
+      "name": "Закрыть с актом",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        560
+      ],
+      "id": "3ad91f1f-1755-50de-b725-60695347fefd",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Intake PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.callback_query.message.chat.id }}",
+        "text": "=Накладная №{{ $json.invoice_id }}: решение «закрыть с актом» записано в базу. Сам акт и претензию поставщику оформляйте вне этого набора.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Акт зафиксирован",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        560
+      ],
+      "id": "1ba12309-c4a3-520b-966e-f853331f28b4",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "Пришлите фото бумажной накладной: бот сверит строки с прайсом и пришлёт зелёный или красный сигнал.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Подсказка",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        760
+      ],
+      "id": "57567fbb-68ab-5e6e-8db5-20bc35723f03",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Что пришло",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Что пришло": {
+      "main": [
+        [
+          {
+            "node": "Скачать фото",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Закрыть с актом",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Подсказка",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Скачать фото": {
+      "main": [
+        [
+          {
+            "node": "Сохранить фото в архив",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "В base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "В base64": {
+      "main": [
+        [
+          {
+            "node": "Распознать Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Распознать Ollama": {
+      "main": [
+        [
+          {
+            "node": "Разобрать JSON и проверить суммы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разобрать JSON и проверить суммы": {
+      "main": [
+        [
+          {
+            "node": "Строки и суммы в порядке?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Строки и суммы в порядке?": {
+      "main": [
+        [
+          {
+            "node": "Записать накладную",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Не разобрал",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Записать накладную": {
+      "main": [
+        [
+          {
+            "node": "Найти отклонения",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Найти отклонения": {
+      "main": [
+        [
+          {
+            "node": "Свести сигнал",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Свести сигнал": {
+      "main": [
+        [
+          {
+            "node": "Есть отклонения?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Есть отклонения?": {
+      "main": [
+        [
+          {
+            "node": "Заблокировать закрытие",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Принять приёмку",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Заблокировать закрытие": {
+      "main": [
+        [
+          {
+            "node": "Красный сигнал",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Принять приёмку": {
+      "main": [
+        [
+          {
+            "node": "Зелёный сигнал",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Закрыть с актом": {
+      "main": [
+        [
+          {
+            "node": "Акт зафиксирован",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

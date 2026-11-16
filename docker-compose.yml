@@ -1,0 +1,65 @@
+# Контроль накладных в пекарнях-кофейнях: n8n + Ollama + PostgreSQL + Cloudflare Tunnel (эпизод 47, пример, не проверен на живом сервере).
+# Теги образов закрепите после первого успешного запуска (docker compose images) и сверьте с официальной документацией каждого проекта.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data          # постоянный том: без него накладные и прайс исчезнут при пересоздании контейнера
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest                    # локальный сервер моделей; модель скачивается вручную (см. Инструкция.txt, шаг 5)
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama                  # кэш моделей: они весят гигабайты, не теряйте том
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}   # задать один раз и не менять: им шифруются ключи подключений
+      N8N_HOST: ${HOST}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${HOST}/
+      N8N_RESTRICT_FILE_ACCESS_TO: /photos          # узел записи файла пишет только в папку фото накладных
+      GENERIC_TIMEZONE: ${TZ}
+      TZ: ${TZ}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - photos:/photos                              # архив фото накладных для споров с поставщиками
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}                # токен туннеля из панели Cloudflare Zero Trust; маршрут: ваш домен -> http://n8n:5678
+    depends_on:
+      - n8n
+
+volumes:
+  pg_data:
+  n8n_data:
+  ollama_data:
+  photos:
